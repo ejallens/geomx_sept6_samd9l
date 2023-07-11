@@ -1,0 +1,535 @@
+---
+title: "nanostring_geomx_proteogenomics"
+author: "eric allenspach"
+date: "2023-06-27"
+output: html_document
+---
+
+```{r}
+BiocManager::install(version="3.17")
+
+BiocManager::install("NanoStringNCTools")
+BiocManager::install("GeomxTools")
+BiocManager::install("GeoMxWorkflows")
+```
+
+```{r}
+library(NanoStringNCTools)
+library(GeomxTools)
+library(GeoMxWorkflows)
+```
+
+#loading the data
+```{r}
+datadir <- file.path("/Users/ericallenspach/r_projects/nanostring_rnaa/20230331_Allenspach_AllSeq")
+```
+
+```{r}
+# automatically list files in each directory for use
+DCCFiles <- dir(file.path(datadir, "dccs"), pattern = ".dcc$",
+                full.names = TRUE, recursive = TRUE)
+PKCFiles <- dir(file.path(datadir, "pkcs"), pattern = ".pkc$",
+                                full.names = TRUE, recursive = TRUE)
+SampleAnnotationFile <- dir(file.path(datadir, "annotation"), pattern = ".xlsx$",
+        full.names = TRUE, recursive = TRUE)
+```
+
+```{r}
+# Load the data
+ourData <- readNanoStringGeoMxSet(dccFiles = DCCFiles,
+                           pkcFiles = PKCFiles,
+                           phenoDataFile = SampleAnnotationFile,
+                           phenoDataSheet = "Template",
+                           phenoDataDccColName = "Sample_ID",
+                           protocolDataColNames = c("aoi", "roi"),
+                           experimentDataColNames = c("panel"))
+```
+
+```{r}
+library(knitr)
+pkcs <- annotation(ourData)
+modules <- gsub(".pkc", "", pkcs)
+kable(data.frame(PKCs = pkcs, modules = modules))
+```
+
+```{r}
+library(dplyr)
+library(ggforce)
+
+# select the annotations we want to show, use `` to surround column names with
+# spaces or special symbols
+count_mat <- count(pData(ourData), segment, group)
+
+# gather the data and plot in order: class, slide name, region, segment
+test_gr <- gather_set_data(count_mat, 1:2)
+test_gr$x <- factor(test_gr$x,
+                    levels = c("segment", "group"))
+# plot Sankey
+ggplot(test_gr, aes(x, id = id, split = y, value = n)) +
+    geom_parallel_sets(aes(fill = group), alpha = 0.5, axis.width = 0.1) +
+    geom_parallel_sets_axes(axis.width = 0.2) +
+    geom_parallel_sets_labels(color = "white", size = 5) +
+    theme_classic(base_size = 17) + 
+    theme(legend.position = "bottom",
+          axis.ticks.y = element_blank(),
+          axis.line = element_blank(),
+          axis.text.y = element_blank()) +
+    scale_y_continuous(expand = expansion(0)) + 
+    scale_x_discrete(expand = expansion(0)) +
+    labs(x = "", y = "") +
+    annotate(geom = "segment", x = 4.25, xend = 4.25,
+             y = 20, yend = 120, lwd = 2) +
+    annotate(geom = "text", x = 4.19, y = 70, angle = 90, size = 5,
+             hjust = 0.5, label = "100 segments")
+```
+
+```{r}
+# Shift counts to one
+ourData <- shiftCountsOne(ourData, useDALogic = TRUE)
+```
+
+```{r}
+# Default QC cutoffs are commented in () adjacent to the respective parameters
+# study-specific values were selected after visualizing the QC results in more
+# detail below
+QC_params <-
+    list(minSegmentReads = 1000, # Minimum number of reads (1000)
+         percentTrimmed = 80,    # Minimum % of reads trimmed (80%)
+         percentStitched = 80,   # Minimum % of reads stitched (80%)
+         percentAligned = 75,    # Minimum % of reads aligned (80%)
+         percentSaturation = 50, # Minimum sequencing saturation (50%)
+         minNegativeCount = 1,   # Minimum negative control counts (10)
+         maxNTCCount = 9000,     # Maximum counts observed in NTC well (1000)
+         minNuclei = 20,         # Minimum # of nuclei estimated (100)
+         minArea = 1000)         # Minimum segment area (5000)
+ourData <-
+    setSegmentQCFlags(ourData, 
+                      qcCutoffs = QC_params)        
+
+# Collate QC Results
+QCResults <- protocolData(ourData)[["QCFlags"]]
+flag_columns <- colnames(QCResults)
+QC_Summary <- data.frame(Pass = colSums(!QCResults[, flag_columns]),
+                         Warning = colSums(QCResults[, flag_columns]))
+QCResults$QCStatus <- apply(QCResults, 1L, function(x) {
+    ifelse(sum(x) == 0L, "PASS", "WARNING")
+})
+QC_Summary["TOTAL FLAGS", ] <-
+    c(sum(QCResults[, "QCStatus"] == "PASS"),
+      sum(QCResults[, "QCStatus"] == "WARNING"))
+```
+
+```{r}
+library(ggplot2)
+col_by <- "group"
+
+# Graphical summaries of QC statistics plot function
+QC_histogram <- function(assay_data = NULL,
+                         annotation = NULL,
+                         fill_by = NULL,
+                         thr = NULL,
+                         scale_trans = NULL) {
+    plt <- ggplot(assay_data,
+                  aes_string(x = paste0("unlist(`", annotation, "`)"),
+                             fill = fill_by)) +
+        geom_histogram(bins = 50) +
+        geom_vline(xintercept = thr, lty = "dashed", color = "black") +
+        theme_bw() + guides(fill = "none") +
+        facet_wrap(as.formula(paste("~", fill_by)), nrow = 4) +
+        labs(x = annotation, y = "Segments, #", title = annotation)
+    if(!is.null(scale_trans)) {
+        plt <- plt +
+            scale_x_continuous(trans = scale_trans)
+    }
+    plt
+}
+```
+
+```{r}
+QC_histogram(sData(ourData), "Trimmed (%)", col_by, 80)
+```
+
+```{r}
+QC_histogram(sData(ourData), "Stitched (%)", col_by, 80)
+```
+
+```{r}
+QC_histogram(sData(ourData), "Aligned (%)", col_by, 75)
+```
+
+```{r}
+QC_histogram(sData(ourData), "Saturated (%)", col_by, 50) +
+    labs(title = "Sequencing Saturation (%)",
+         x = "Sequencing Saturation (%)")
+```
+
+```{r}
+QC_histogram(sData(ourData), "area", col_by, 1000, scale_trans = "log10")
+```
+
+```{r}
+# calculate the negative geometric means for each module
+negativeGeoMeans <- 
+    esBy(negativeControlSubset(ourData), 
+         GROUP = "Module", 
+         FUN = function(x) { 
+             assayDataApply(x, MARGIN = 2, FUN = ngeoMean, elt = "exprs") 
+         }) 
+protocolData(ourData)[["NegGeoMean"]] <- negativeGeoMeans
+
+# explicitly copy the Negative geoMeans from sData to pData
+negCols <- paste0("NegGeoMean_", modules)
+pData(ourData)[, negCols] <- sData(ourData)[["NegGeoMean"]]
+for(ann in negCols) {
+    plt <- QC_histogram(pData(ourData), ann, col_by, 2, scale_trans = "log10")
+    print(plt)
+}
+
+
+```
+
+```{r}
+# detatch neg_geomean columns ahead of aggregateCounts call
+pData(ourData) <- pData(ourData)[, !colnames(pData(ourData)) %in% negCols]
+
+# show all NTC values, Freq = # of Segments with a given NTC count:
+kable(table(NTC_Count = sData(ourData)$NTC),
+      col.names = c("NTC Count", "# of Segments"))
+```
+
+
+```{r}
+kable(QC_Summary, caption = "QC Summary Table for each Segment")
+```
+
+```{r}
+ourData <- ourData[, QCResults$QCStatus == "PASS"]
+
+# Subsetting our dataset has removed samples which did not pass QC
+dim(ourData)
+#> Features  Samples 
+#>    18642      229
+```
+
+```{r}
+# Generally keep the qcCutoffs parameters unchanged. Set removeLocalOutliers to 
+# FALSE if you do not want to remove local outliers
+ourData <- setBioProbeQCFlags(ourData, 
+                               qcCutoffs = list(minProbeRatio = 0.1,
+                                                percentFailGrubbs = 20), 
+                               removeLocalOutliers = TRUE)
+
+ProbeQCResults <- fData(ourData)[["QCFlags"]]
+
+# Define QC table for Probe QC
+qc_df <- data.frame(Passed = sum(rowSums(ProbeQCResults[, -1]) == 0),
+                    Global = sum(ProbeQCResults$GlobalGrubbsOutlier),
+                    Local = sum(rowSums(ProbeQCResults[, -2:-1]) > 0
+                                & !ProbeQCResults$GlobalGrubbsOutlier))
+```
+
+
+```{r}
+#Subset object to exclude all that did not pass Ratio & Global testing
+ProbeQCPassed <- 
+    subset(ourData, 
+           fData(ourData)[["QCFlags"]][,c("LowProbeRatio")] == FALSE &
+               fData(ourData)[["QCFlags"]][,c("GlobalGrubbsOutlier")] == FALSE)
+dim(ProbeQCPassed)
+#> Features  Samples 
+#>    18641      229
+ourData <- ProbeQCPassed 
+```
+
+
+```{r}
+# Check how many unique targets the object has
+length(unique(featureData(ourData)[["TargetName"]]))
+#> [1] 18504
+
+# collapse to targets
+target_ourData <- aggregateCounts(ourData)
+dim(target_ourData)
+#> Features  Samples 
+#>    18504      229
+exprs(target_ourData)[1:5, 1:2]
+#>       DSP-1001250007851-H-A02.dcc DSP-1001250007851-H-A03.dcc
+#> A2M                           485                         262
+#> NAT2                           15                          18
+#> ACADM                          31                          15
+#> ACADS                          27                          17
+#> ACAT1                          29                          24
+```
+
+```{r}
+# Define LOQ SD threshold and minimum value
+cutoff <- 2
+minLOQ <- 2
+
+# Calculate LOQ per module tested
+LOQ <- data.frame(row.names = colnames(target_ourData))
+for(module in modules) {
+    vars <- paste0(c("NegGeoMean_", "NegGeoSD_"),
+                   module)
+    if(all(vars[1:2] %in% colnames(pData(target_ourData)))) {
+        LOQ[, module] <-
+            pmax(minLOQ,
+                 pData(target_ourData)[, vars[1]] * 
+                     pData(target_ourData)[, vars[2]] ^ cutoff)
+    }
+}
+pData(target_ourData)$LOQ <- LOQ
+```
+
+```{r}
+LOQ_Mat <- c()
+for(module in modules) {
+    ind <- fData(target_ourData)$Module == module
+    Mat_i <- t(esApply(target_ourData[ind, ], MARGIN = 1,
+                       FUN = function(x) {
+                           x > LOQ[, module]
+                       }))
+    LOQ_Mat <- rbind(LOQ_Mat, Mat_i)
+}
+# ensure ordering since this is stored outside of the geomxSet
+LOQ_Mat <- LOQ_Mat[fData(target_ourData)$TargetName, ]
+```
+
+```{r}
+# Save detection rate information to pheno data
+pData(target_ourData)$GenesDetected <- 
+    colSums(LOQ_Mat, na.rm = TRUE)
+pData(target_ourData)$GeneDetectionRate <-
+    pData(target_ourData)$GenesDetected / nrow(target_ourData)
+
+# Determine detection thresholds: 1%, 5%, 10%, 15%, >15%
+pData(target_ourData)$DetectionThreshold <- 
+    cut(pData(target_ourData)$GeneDetectionRate,
+        breaks = c(0, 0.01, 0.05, 0.1, 0.15, 1),
+        labels = c("<1%", "1-5%", "5-10%", "10-15%", ">15%"))
+
+# stacked bar plot of different cut points (1%, 5%, 10%, 15%)
+ggplot(pData(target_ourData),
+       aes(x = DetectionThreshold)) +
+    geom_bar(aes(fill = group)) +
+    geom_text(stat = "count", aes(label = ..count..), vjust = -0.5) +
+    theme_bw() +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+    labs(x = "Gene Detection Rate",
+         y = "Segments, #",
+         fill = "Segment Type")
+#> Warning: The dot-dot notation (`..count..`) was deprecated in ggplot2 3.4.0.
+#> ℹ Please use `after_stat(count)` instead.
+#> This warning is displayed once every 8 hours.
+#> Call `lifecycle::last_lifecycle_warnings()` to see where this warning was
+#> generated.
+```
+
+
+```{r}
+target_ourData <-
+    target_ourData[, pData(target_ourData)$GeneDetectionRate >= .02]
+
+dim(target_ourData)
+```
+
+```{r}
+library(scales) # for percent
+
+# Calculate detection rate:
+LOQ_Mat <- LOQ_Mat[, colnames(target_ourData)]
+fData(target_ourData)$DetectedSegments <- rowSums(LOQ_Mat, na.rm = TRUE)
+fData(target_ourData)$DetectionRate <-
+    fData(target_ourData)$DetectedSegments / nrow(pData(target_ourData))
+
+# Gene of interest detection table
+goi <- c("CD3E", "CD4", "CD8A", "CD68", "EPCAM",
+         "KRT18", "CEBPA", "IRF8", "SPI1", "SAMD9L", "SEPTIN6")
+goi_df <- data.frame(
+    Gene = goi,
+    Number = fData(target_ourData)[goi, "DetectedSegments"],
+    DetectionRate = percent(fData(target_ourData)[goi, "DetectionRate"]))
+```
+
+```{r}
+# Plot detection rate:
+plot_detect <- data.frame(Freq = c(1, 5, 10, 20, 30, 50))
+plot_detect$Number <-
+    unlist(lapply(c(0.01, 0.05, 0.1, 0.2, 0.3, 0.5),
+                  function(x) {sum(fData(target_ourData)$DetectionRate >= x)}))
+plot_detect$Rate <- plot_detect$Number / nrow(fData(target_ourData))
+rownames(plot_detect) <- plot_detect$Freq
+
+ggplot(plot_detect, aes(x = as.factor(Freq), y = Rate, fill = Rate)) +
+    geom_bar(stat = "identity") +
+    geom_text(aes(label = formatC(Number, format = "d", big.mark = ",")),
+              vjust = 1.6, color = "black", size = 4) +
+    scale_fill_gradient2(low = "orange2", mid = "lightblue",
+                         high = "dodgerblue3", midpoint = 0.65,
+                         limits = c(0,1),
+                         labels = scales::percent) +
+    theme_bw() +
+    scale_y_continuous(labels = scales::percent, limits = c(0,1),
+                       expand = expansion(mult = c(0, 0))) +
+    labs(x = "% of Segments",
+         y = "Genes Detected, % of Panel > LOQ")
+
+
+```
+
+```{r}
+# Subset to target genes detected in at least 10% of the samples.
+#   Also manually include the negative control probe, for downstream use
+negativeProbefData <- subset(fData(target_ourData), CodeClass == "Negative")
+neg_probes <- unique(negativeProbefData$TargetName)
+target_ourData <- 
+    target_ourData[fData(target_ourData)$DetectionRate >= 0.05|
+                        fData(target_ourData)$TargetName %in% neg_probes, ]
+dim(target_ourData)
+#> Features  Samples 
+#>    10131      221
+
+# retain only detected genes of interest
+#goi <- goi[goi %in% rownames(target_ourData)]
+```
+
+```{r}
+library(reshape2)  # for melt
+library(cowplot)   # for plot_grid
+
+# Graph Q3 value vs negGeoMean of Negatives
+ann_of_interest <- "group"
+Stat_data <- 
+    data.frame(row.names = colnames(exprs(target_ourData)),
+               Segment = colnames(exprs(target_ourData)),
+               Annotation = pData(target_ourData)[, ann_of_interest],
+               Q3 = unlist(apply(exprs(target_ourData), 2,
+                                 quantile, 0.75, na.rm = TRUE)),
+               NegProbe = exprs(target_ourData)[neg_probes, ])
+Stat_data_m <- melt(Stat_data, measure.vars = c("Q3", "NegProbe"),
+                    variable.name = "Statistic", value.name = "Value")
+
+plt1 <- ggplot(Stat_data_m,
+               aes(x = Value, fill = Statistic)) +
+    geom_histogram(bins = 40) + theme_bw() +
+    scale_x_continuous(trans = "log2") +
+    facet_wrap(~Annotation, nrow = 1) + 
+    scale_fill_brewer(palette = 3, type = "qual") +
+    labs(x = "Counts", y = "Segments, #")
+
+plt2 <- ggplot(Stat_data,
+               aes(x = NegProbe, y = Q3, color = Annotation)) +
+    geom_abline(intercept = 0, slope = 1, lty = "dashed", color = "darkgray") +
+    geom_point() + guides(color = "none") + theme_bw() +
+    scale_x_continuous(trans = "log2") + 
+    scale_y_continuous(trans = "log2") +
+    theme(aspect.ratio = 1) +
+    labs(x = "Negative Probe GeoMean, Counts", y = "Q3 Value, Counts")
+
+plt3 <- ggplot(Stat_data,
+               aes(x = NegProbe, y = Q3 / NegProbe, color = Annotation)) +
+    geom_hline(yintercept = 1, lty = "dashed", color = "darkgray") +
+    geom_point() + theme_bw() +
+    scale_x_continuous(trans = "log2") + 
+    scale_y_continuous(trans = "log2") +
+    theme(aspect.ratio = 1) +
+    labs(x = "Negative Probe GeoMean, Counts", y = "Q3/NegProbe Value, Counts")
+
+btm_row <- plot_grid(plt2, plt3, nrow = 1, labels = c("B", ""),
+                     rel_widths = c(0.43,0.57))
+plot_grid(plt1, btm_row, ncol = 1, labels = c("A", ""))
+```
+Note: not sure if this is correct, but we did use phiX spike-in
+```{r}
+# Q3 norm (75th percentile) for WTA/CTA  with or without custom spike-ins
+target_ourData <- normalize(target_ourData ,
+                             norm_method = "quant", 
+                             desiredQuantile = .75,
+                             toElt = "q_norm")
+```
+
+```{r}
+# visualize the first 10 segments with each normalization method
+boxplot(exprs(target_ourData)[,1:10],
+        col = "#9EDAE5", main = "Raw Counts",
+        log = "y", names = 1:10, xlab = "Segment",
+        ylab = "Counts, Raw")
+```
+
+```{r}
+boxplot(assayDataElement(target_ourData[,1:10], elt = "q_norm"),
+        col = "#2CA02C", main = "Q3 Norm Counts",
+        log = "y", names = 1:10, xlab = "Segment",
+        ylab = "Counts, Q3 Normalized")
+```
+
+```{r}
+boxplot(assayDataElement(target_ourData[,1:10], elt = "neg_norm"),
+        col = "#FF7F0E", main = "Neg Norm Counts",
+        log = "y", names = 1:10, xlab = "Segment",
+        ylab = "Counts, Neg. Normalized")
+```
+
+```{r}
+library(umap)
+library(Rtsne)
+
+# update defaults for umap to contain a stable random_state (seed)
+custom_umap <- umap::umap.defaults
+custom_umap$random_state <- 42
+# run UMAP
+umap_out <-
+    umap(t(log2(assayDataElement(target_ourData , elt = "q_norm"))),  
+         config = custom_umap)
+pData(target_ourData)[, c("UMAP1", "UMAP2")] <- umap_out$layout[, c(1,2)]
+ggplot(pData(target_ourData),
+       aes(x = UMAP1, y = UMAP2, color = group)) +
+    geom_point(size = 3) +
+    theme_bw()
+```
+
+```{r}
+# run tSNE
+set.seed(42) # set the seed for tSNE as well
+tsne_out <-
+    Rtsne(t(log2(assayDataElement(target_ourData , elt = "q_norm"))),
+          perplexity = ncol(target_ourData)*.15)
+pData(target_ourData)[, c("tSNE1", "tSNE2")] <- tsne_out$Y[, c(1,2)]
+ggplot(pData(target_ourData),
+       aes(x = tSNE1, y = tSNE2, color = group)) +
+    geom_point(size = 3) +
+    theme_bw()
+```
+
+```{r}
+library(pheatmap)  # for pheatmap
+# create a log2 transform of the data for analysis
+assayDataElement(object = target_ourData, elt = "log_q") <-
+    assayDataApply(target_ourData, 2, FUN = log, base = 2, elt = "q_norm")
+
+# create CV function
+calc_CV <- function(x) {sd(x) / mean(x)}
+CV_dat <- assayDataApply(target_ourData,
+                         elt = "log_q", MARGIN = 1, calc_CV)
+# show the highest CD genes and their CV values
+sort(CV_dat, decreasing = TRUE)[1:5]
+#>   CAMK2N1    AKR1C1      AQP2     GDF15       REN 
+#> 0.5886006 0.5114973 0.4607206 0.4196469 0.4193216
+
+# Identify genes in the top 3rd of the CV values
+GOI <- names(CV_dat)[CV_dat > quantile(CV_dat, 0.8)]
+pheatmap(assayDataElement(target_ourData[GOI, ], elt = "log_q"),
+         scale = "row", 
+         show_rownames = FALSE, show_colnames = FALSE,
+         border_color = NA,
+         clustering_method = "average",
+         clustering_distance_rows = "correlation",
+         clustering_distance_cols = "correlation",
+         breaks = seq(-3, 3, 0.05),
+         color = colorRampPalette(c("purple3", "black", "yellow2"))(120),
+         annotation_col = 
+             pData(target_ourData)[, c("group", "segment")])
+```
+
+
+
